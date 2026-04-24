@@ -36,3 +36,5 @@ python .\rest_reminder.py
 - 小提醒建议 15~30 分钟。
 - 大提醒建议 90~180 分钟。
 - 强制休息时长建议 60~300 秒。
+
+*Developed with ❤️ by Felix | 期待您的使用与反馈*
