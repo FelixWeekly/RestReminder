@@ -15,6 +15,7 @@ dist/
 
 # Local runtime config
 config.json
+*.ico
 
 # IDE/editor
 .vscode/

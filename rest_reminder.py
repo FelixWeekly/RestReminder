@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Optional
+from typing import Callable, Optional
 
 try:
     import winsound
@@ -51,13 +51,15 @@ def draw_rounded_rect(canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, rad
 
 
 class RoundedCard(tk.Frame):
-    def __init__(self, parent: tk.Widget, bg: str, radius: int = 16, pad: int = 20):
+    def __init__(self, parent: tk.Widget, bg: str, radius: int = 16, pad: int = 20, fixed_height: Optional[int] = None):
         super().__init__(parent, bg=parent.cget("bg"))
         self.bg_color = bg
         self.radius = radius
         self.pad = pad
 
         self.canvas = tk.Canvas(self, bg=parent.cget("bg"), highlightthickness=0, bd=0)
+        if fixed_height is not None:
+            self.canvas.configure(height=max(10, fixed_height))
         self.canvas.pack(fill="both", expand=True)
 
         self.inner = tk.Frame(self.canvas, bg=bg)
@@ -72,17 +74,86 @@ class RoundedCard(tk.Frame):
         self.canvas.coords(self.inner_win, self.pad, self.pad)
 
 
+class TitleBarButton(tk.Canvas):
+    def __init__(self, parent: tk.Widget, kind: str, command: Callable[[], None]):
+        super().__init__(
+            parent,
+            width=42,
+            height=28,
+            bg=parent.cget("bg"),
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+            takefocus=0,
+        )
+        self.kind = kind
+        self.command = command
+        self.hovered = False
+        self.pressed = False
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.redraw()
+
+    def palette(self) -> tuple[str, str, str]:
+        if self.kind == "close":
+            if self.pressed:
+                return "#d1242f", "#d1242f", "#ffffff"
+            if self.hovered:
+                return "#ea4a5a", "#ea4a5a", "#ffffff"
+            return "#f8d6da", "#f3c2c8", "#a40e26"
+
+        if self.pressed:
+            return "#dce2ea", "#c9d1db", "#2f363d"
+        if self.hovered:
+            return "#e8edf3", "#d4dbe4", "#2f363d"
+        return "#f4f6f9", "#dde3ea", "#57606a"
+
+    def redraw(self) -> None:
+        bg, border, icon = self.palette()
+        self.delete("all")
+        self.create_rectangle(4, 4, 38, 24, fill=bg, outline=border, width=1)
+        if self.kind == "close":
+            self.create_line(17, 11, 25, 19, fill=icon, width=2, capstyle=tk.ROUND)
+            self.create_line(25, 11, 17, 19, fill=icon, width=2, capstyle=tk.ROUND)
+        else:
+            self.create_line(16, 17, 26, 17, fill=icon, width=2, capstyle=tk.ROUND)
+
+    def _on_enter(self, _event: tk.Event) -> None:
+        self.hovered = True
+        self.redraw()
+
+    def _on_leave(self, _event: tk.Event) -> None:
+        self.hovered = False
+        self.pressed = False
+        self.redraw()
+
+    def _on_press(self, _event: tk.Event) -> None:
+        self.pressed = True
+        self.redraw()
+
+    def _on_release(self, event: tk.Event) -> None:
+        was_pressed = self.pressed
+        self.pressed = False
+        self.redraw()
+        inside = 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height()
+        if was_pressed and inside:
+            self.command()
+
+
 class RestReminderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.enable_hidpi_support()
         self.root.title("Rest Reminder")
-        self.root.geometry("1400x900")
-        self.root.minsize(1240, 780)
+        self.root.minsize(1040, 700)
+        startup_w, startup_h = self.pick_startup_size()
+        startup_x, startup_y = self.calculate_center_position(startup_w, startup_h)
+        self.root.geometry(f"{startup_w}x{startup_h}+{startup_x}+{startup_y}")
         self.root.configure(bg="#dde2e8")
         self.use_borderless_window = False
-        if self.use_borderless_window:
-            self.root.overrideredirect(True)
         self.root.option_add("*Font", "{Microsoft YaHei UI} 12")
 
         self.config = self.load_config()
@@ -107,20 +178,63 @@ class RestReminderApp:
         self.next_small_var = tk.StringVar(value="--:--")
         self.next_big_var = tk.StringVar(value="--:--")
         self.stopwatch_var = tk.StringVar(value="00:00:00")
-        self.stopwatch_btn_var = tk.StringVar(value="开始计时")
         self.stopwatch_running = False
         self.stopwatch_elapsed = 0.0
         self.stopwatch_started_ts = 0.0
+        self.stopwatch_start_btn: Optional[tk.Button] = None
+        self.stopwatch_pause_btn: Optional[tk.Button] = None
+        self.did_initial_map_center = False
+        self.native_chrome_applied = False
+        self.native_style_attempts = 0
         self.icon_photo_ref: Optional[tk.PhotoImage] = None
 
         self.style = ttk.Style()
         self.setup_styles()
         self.apply_window_icon()
         self.build_ui()
-        self.center_window()
+        self.root.after(0, self.finish_startup_window_setup)
         self.root.bind("<Map>", self.restore_custom_window)
         self.root.protocol("WM_DELETE_WINDOW", self.on_root_close)
-        self.root.after(10, self.apply_taskbar_style)
+
+    def finish_startup_window_setup(self) -> None:
+        self.apply_native_window_colors()
+        self.center_window()
+        self.root.after(30, self.apply_native_window_colors)
+        self.root.after(40, self.center_window)
+
+    def get_work_area(self) -> tuple[int, int, int, int]:
+        if sys.platform != "win32":
+            return (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        try:
+            from ctypes import windll, wintypes
+
+            rect = wintypes.RECT()
+            SPI_GETWORKAREA = 0x0030
+            ok = windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, rect, 0)
+            if ok and rect.right > rect.left and rect.bottom > rect.top:
+                return (rect.left, rect.top, rect.right, rect.bottom)
+        except Exception:
+            pass
+        return (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+
+    def pick_startup_size(self) -> tuple[int, int]:
+        left, top, right, bottom = self.get_work_area()
+        available_w = max(1, right - left)
+        available_h = max(1, bottom - top)
+
+        target_w = min(1480, int(available_w * 0.93))
+        target_h = min(940, int(available_h * 0.93))
+        startup_w = max(1040, target_w)
+        startup_h = max(700, target_h)
+        return (min(startup_w, available_w), min(startup_h, available_h))
+
+    def calculate_center_position(self, width: int, height: int) -> tuple[int, int]:
+        left, top, right, bottom = self.get_work_area()
+        available_w = max(1, right - left)
+        available_h = max(1, bottom - top)
+        x = left + max(0, (available_w - width) // 2)
+        y = top + max(0, (available_h - height) // 2)
+        return (x, y)
 
     def enable_hidpi_support(self) -> None:
         if sys.platform != "win32":
@@ -139,32 +253,173 @@ class RestReminderApp:
 
     def center_window(self) -> None:
         self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
-        x = max(0, (self.root.winfo_screenwidth() - width) // 2)
-        y = max(0, (self.root.winfo_screenheight() - height) // 2)
+        left, top, right, bottom = self.get_work_area()
+        available_w = max(1, right - left)
+        available_h = max(1, bottom - top)
+        min_w, min_h = self.root.minsize()
+
+        width = max(self.root.winfo_width(), self.root.winfo_reqwidth(), min_w)
+        height = max(self.root.winfo_height(), self.root.winfo_reqheight(), min_h)
+        width = min(width, available_w)
+        height = min(height, available_h)
+
+        x, y = self.calculate_center_position(width, height)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
+    def get_window_hwnd(self) -> int:
+        hwnd = self.root.winfo_id()
+        if sys.platform != "win32":
+            return hwnd
+        try:
+            from ctypes import windll
+
+            GA_ROOT = 2
+            root_hwnd = windll.user32.GetAncestor(hwnd, GA_ROOT)
+            if root_hwnd:
+                return root_hwnd
+            parent_hwnd = windll.user32.GetParent(hwnd)
+            if parent_hwnd:
+                return parent_hwnd
+        except Exception:
+            pass
+        return hwnd
+
     def start_drag(self, event: tk.Event) -> None:
+        if self.use_borderless_window and sys.platform == "win32":
+            try:
+                from ctypes import windll
+
+                WM_NCLBUTTONDOWN = 0x00A1
+                HTCAPTION = 2
+                windll.user32.ReleaseCapture()
+                windll.user32.SendMessageW(self.get_window_hwnd(), WM_NCLBUTTONDOWN, HTCAPTION, 0)
+                return
+            except Exception:
+                pass
         self.drag_start_x = event.x_root
         self.drag_start_y = event.y_root
         self.drag_win_x = self.root.winfo_x()
         self.drag_win_y = self.root.winfo_y()
 
     def do_drag(self, event: tk.Event) -> None:
+        if self.use_borderless_window and sys.platform == "win32":
+            return
         new_x = self.drag_win_x + (event.x_root - self.drag_start_x)
         new_y = self.drag_win_y + (event.y_root - self.drag_start_y)
         self.root.geometry(f"+{new_x}+{new_y}")
 
     def minimize_custom_window(self) -> None:
         if self.use_borderless_window:
-            self.root.overrideredirect(False)
+            try:
+                from ctypes import windll
+
+                SW_MINIMIZE = 6
+                windll.user32.ShowWindow(self.get_window_hwnd(), SW_MINIMIZE)
+            except Exception:
+                self.root.iconify()
+            return
         self.root.iconify()
 
     def restore_custom_window(self, _event: tk.Event) -> None:
-        if self.use_borderless_window and self.root.state() == "normal":
-            self.root.overrideredirect(True)
-        self.apply_taskbar_style()
+        if self.root.state() != "normal":
+            return
+        self.apply_native_window_colors()
+        if not self.did_initial_map_center:
+            self.did_initial_map_center = True
+            self.root.after(20, self.center_window)
+
+    def apply_native_window_colors(self) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            from ctypes import byref, c_uint, windll
+
+            hwnd = self.get_window_hwnd()
+            DWMWA_BORDER_COLOR = 34
+            DWMWA_CAPTION_COLOR = 35
+            DWMWA_TEXT_COLOR = 36
+
+            def rgb_to_colorref(hex_color: str) -> int:
+                rgb = hex_color.lstrip("#")
+                r = int(rgb[0:2], 16)
+                g = int(rgb[2:4], 16)
+                b = int(rgb[4:6], 16)
+                return r | (g << 8) | (b << 16)
+
+            border = c_uint(rgb_to_colorref("#dde2e8"))
+            caption = c_uint(rgb_to_colorref("#dde2e8"))
+            text = c_uint(rgb_to_colorref("#1f2328"))
+
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, byref(border), 4)
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, byref(caption), 4)
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, byref(text), 4)
+        except Exception:
+            pass
+
+    def ensure_native_borderless_style(self) -> None:
+        self.apply_native_borderless_style()
+        if not self.use_borderless_window or self.native_chrome_applied:
+            return
+        if self.native_style_attempts >= 8:
+            return
+        self.native_style_attempts += 1
+        self.root.after(40, self.ensure_native_borderless_style)
+
+    def apply_native_borderless_style(self) -> None:
+        if sys.platform != "win32" or not self.use_borderless_window:
+            return
+        try:
+            from ctypes import byref, c_int, windll
+
+            hwnd = self.get_window_hwnd()
+            GWL_STYLE = -16
+            GWL_EXSTYLE = -20
+            WS_OVERLAPPEDWINDOW = 0x00CF0000
+            WS_POPUP = 0x80000000
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_SYSMENU = 0x00080000
+            WS_VISIBLE = 0x10000000
+            WS_EX_WINDOWEDGE = 0x00000100
+            WS_EX_CLIENTEDGE = 0x00000200
+            WS_EX_DLGMODALFRAME = 0x00000001
+            WS_EX_STATICEDGE = 0x00020000
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOZORDER = 0x0004
+            SWP_FRAMECHANGED = 0x0020
+            SWP_NOOWNERZORDER = 0x0200
+            DWMWA_NCRENDERING_POLICY = 2
+            DWMNCRP_DISABLED = 1
+
+            style = windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            ex_style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            new_style = (style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_VISIBLE
+            new_ex_style = ex_style & ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE)
+            if new_style != style or new_ex_style != ex_style or not self.native_chrome_applied:
+                windll.user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
+                windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex_style)
+                windll.user32.SetWindowPos(
+                    hwnd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                )
+                policy = c_int(DWMNCRP_DISABLED)
+                try:
+                    windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, byref(policy), 4)
+                except Exception:
+                    pass
+            current_style = windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
+            current_ex_style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            chrome_bits = 0x00C00000 | 0x00040000 | 0x00800000 | 0x00400000
+            edge_bits = WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE
+            self.native_chrome_applied = (current_style & chrome_bits) == 0 and (current_ex_style & edge_bits) == 0
+        except Exception:
+            pass
 
     def apply_taskbar_style(self) -> None:
         if sys.platform != "win32" or not self.use_borderless_window:
@@ -172,7 +427,7 @@ class RestReminderApp:
         try:
             from ctypes import windll
 
-            hwnd = self.root.winfo_id()
+            hwnd = self.get_window_hwnd()
             GWL_EXSTYLE = -20
             WS_EX_APPWINDOW = 0x00040000
             WS_EX_TOOLWINDOW = 0x00000080
@@ -186,18 +441,22 @@ class RestReminderApp:
     def find_icon_source(self) -> Optional[Path]:
         base = Path(__file__).resolve().parent
         candidates = [
-            "app.ico",
-            "icon.ico",
-            "rest_reminder.ico",
+            "app.normalized.ico",
             "app.png",
             "icon.png",
             "rest_reminder.png",
+            "app.ico",
+            "icon.ico",
+            "rest_reminder.ico",
         ]
+        found: list[Path] = []
         for name in candidates:
             path = base / name
             if path.exists() and path.is_file():
-                return path
-        return None
+                found.append(path)
+        if not found:
+            return None
+        return max(found, key=lambda p: p.stat().st_mtime)
 
     def build_normalized_icon(self, source: Path) -> Optional[Path]:
         try:
@@ -207,18 +466,44 @@ class RestReminderApp:
 
         try:
             with Image.open(source) as image:
-                image = image.convert("RGBA")
-                width, height = image.size
-                side = min(width, height)
-                left = (width - side) // 2
-                top = (height - side) // 2
-                cropped = image.crop((left, top, left + side, top + side))
+                frame = image.convert("RGBA")
+                try:
+                    frame_count = image.n_frames
+                except (AttributeError, OSError):
+                    frame_count = 1
+
+                best_area = frame.width * frame.height
+                for index in range(1, frame_count):
+                    image.seek(index)
+                    candidate = image.convert("RGBA")
+                    area = candidate.width * candidate.height
+                    if area > best_area:
+                        frame = candidate
+                        best_area = area
+
+                alpha_bbox = frame.getchannel("A").getbbox()
+                if alpha_bbox is not None:
+                    frame = frame.crop(alpha_bbox)
 
                 if hasattr(Image, "Resampling"):
                     resample = Image.Resampling.LANCZOS
                 else:
                     resample = Image.LANCZOS
-                normalized = cropped.resize((512, 512), resample)
+
+                canvas_size = 512
+                target_fill = 0.92
+                max_side = max(frame.width, frame.height)
+                if max_side <= 0:
+                    return source if source.suffix.lower() == ".ico" else None
+                scale = (canvas_size * target_fill) / max_side
+                target_w = max(1, int(round(frame.width * scale)))
+                target_h = max(1, int(round(frame.height * scale)))
+
+                resized = frame.resize((target_w, target_h), resample)
+                normalized = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+                offset_x = (canvas_size - target_w) // 2
+                offset_y = (canvas_size - target_h) // 2
+                normalized.paste(resized, (offset_x, offset_y), resized)
 
                 target = source.with_name("app.normalized.ico")
                 normalized.save(
@@ -291,77 +576,64 @@ class RestReminderApp:
             background=[("active", "#e5edf7"), ("pressed", "#d5e2f0")],
         )
 
+        self.style.configure(
+            "MiniPrimary.TButton",
+            foreground="#ffffff",
+            background="#0b5cad",
+            borderwidth=0,
+            padding=(14, 8),
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        self.style.map(
+            "MiniPrimary.TButton",
+            background=[("active", "#0f6bc9"), ("pressed", "#084787")],
+        )
+
+        self.style.configure(
+            "MiniSecondary.TButton",
+            foreground="#263238",
+            background="#e7eaed",
+            borderwidth=0,
+            padding=(14, 8),
+            font=("Microsoft YaHei UI", 11),
+        )
+        self.style.map(
+            "MiniSecondary.TButton",
+            background=[("active", "#d8dee4"), ("pressed", "#c7d0d9")],
+        )
+
+        self.style.configure(
+            "MiniGhost.TButton",
+            foreground="#0e639c",
+            background="#f0f4f8",
+            borderwidth=0,
+            padding=(14, 8),
+            font=("Microsoft YaHei UI", 11),
+        )
+        self.style.map(
+            "MiniGhost.TButton",
+            background=[("active", "#e5edf7"), ("pressed", "#d5e2f0")],
+        )
+
     def build_ui(self) -> None:
-        root_wrap = tk.Frame(self.root, bg="#dde2e8", padx=1, pady=1)
+        root_wrap = tk.Frame(self.root, bg="#dde2e8", padx=0, pady=0)
         root_wrap.pack(fill="both", expand=True)
 
         app_surface = tk.Frame(root_wrap, bg="#eef1f5")
         app_surface.pack(fill="both", expand=True)
 
-        if self.use_borderless_window:
-            title_bar = tk.Frame(app_surface, bg="#e5e9ef", height=44)
-            title_bar.pack(fill="x")
-            title_bar.pack_propagate(False)
-
-            title_label = tk.Label(
-                title_bar,
-                text="  Rest Reminder",
-                bg="#e5e9ef",
-                fg="#1f2328",
-                font=("Segoe UI", 11, "bold"),
-                anchor="w",
-            )
-            title_label.pack(side="left", fill="y")
-
-            title_btns = tk.Frame(title_bar, bg="#e5e9ef")
-            title_btns.pack(side="right", fill="y")
-
-            min_btn = tk.Button(
-                title_btns,
-                text="-",
-                command=self.minimize_custom_window,
-                bg="#e5e9ef",
-                fg="#444",
-                activebackground="#d8dee6",
-                activeforeground="#111",
-                relief="flat",
-                borderwidth=0,
-                width=4,
-                font=("Segoe UI", 11, "bold"),
-            )
-            min_btn.pack(side="left", fill="y")
-
-            close_btn = tk.Button(
-                title_btns,
-                text="✕",
-                command=self.root.destroy,
-                bg="#e5e9ef",
-                fg="#444",
-                activebackground="#c42b1c",
-                activeforeground="#ffffff",
-                relief="flat",
-                borderwidth=0,
-                width=4,
-                font=("Segoe UI", 10, "bold"),
-            )
-            close_btn.pack(side="left", fill="y")
-
-            for widget in (title_bar, title_label):
-                widget.bind("<ButtonPress-1>", self.start_drag)
-                widget.bind("<B1-Motion>", self.do_drag)
-
-        content = tk.Frame(app_surface, bg="#eef1f5", padx=30, pady=26)
+        content = tk.Frame(app_surface, bg="#eef1f5", padx=36, pady=30)
         content.pack(fill="both", expand=True)
 
         header = tk.Frame(content, bg="#eef1f5")
-        header.pack(fill="x", pady=(0, 18))
+        header.pack(fill="x", pady=(0, 22))
 
         tk.Label(
             header,
             text="Rest Reminder",
             bg="#eef1f5",
             fg="#1f2328",
-            font=("Segoe UI", 34, "bold"),
+            font=("Segoe UI", 36, "bold"),
         ).pack(anchor="w")
 
         body = tk.Frame(content, bg="#eef1f5")
@@ -370,8 +642,9 @@ class RestReminderApp:
         left = RoundedCard(body, bg="#ffffff", radius=18, pad=22)
         left.pack(side="left", fill="both", expand=True)
 
-        right = RoundedCard(body, bg="#f8fafc", radius=18, pad=22)
-        right.pack(side="left", fill="y", padx=(18, 0))
+        right = RoundedCard(body, bg="#f8fafc", radius=18, pad=18)
+        right.configure(width=430)
+        right.pack(side="left", fill="both", padx=(20, 0))
 
         self.build_setting_row(left.inner, 0, "小提醒间隔（分钟）", self.small_var)
         self.build_setting_row(left.inner, 1, "大提醒间隔（分钟）", self.big_var)
@@ -384,7 +657,7 @@ class RestReminderApp:
         ttk.Button(btn_row, text="停止提醒", command=self.stop, style="Secondary.TButton").pack(side="left", padx=(0, 10))
         ttk.Button(btn_row, text="立即测试", command=self.test_now, style="Ghost.TButton").pack(side="left")
 
-        status_card = RoundedCard(left.inner, bg="#f6f8fa", radius=14, pad=14)
+        status_card = RoundedCard(left.inner, bg="#f6f8fa", radius=14, pad=14, fixed_height=104)
         status_card.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         left.inner.grid_columnconfigure(0, weight=1)
 
@@ -400,30 +673,64 @@ class RestReminderApp:
         self.build_stat_card(right.inner, "下次强提醒", self.next_big_var, "#bc4c00")
         self.build_stat_card(right.inner, "副时钟", self.stopwatch_var, "#1a7f37")
 
-        stopwatch_btn_row = tk.Frame(right.inner, bg="#f8fafc")
-        stopwatch_btn_row.pack(anchor="w", pady=(12, 0))
-        ttk.Button(
-            stopwatch_btn_row,
-            textvariable=self.stopwatch_btn_var,
-            command=self.toggle_stopwatch,
-            style="Primary.TButton",
-        ).pack(side="left", padx=(0, 10))
-        ttk.Button(
-            stopwatch_btn_row,
-            text="清零",
-            command=self.reset_stopwatch,
-            style="Secondary.TButton",
-        ).pack(side="left")
-
         tk.Label(
             right.inner,
-            text="建议：每次小提醒离屏 20 秒，强提醒时至少站起来活动 1 分钟。",
-            justify="left",
+            text="计时控制",
             bg="#f8fafc",
             fg="#57606a",
-            font=("Microsoft YaHei UI", 12),
-            wraplength=300,
-        ).pack(anchor="w", pady=(16, 0))
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(anchor="w", pady=(14, 4))
+
+        stopwatch_btn_row = tk.Frame(right.inner, bg="#f8fafc")
+        stopwatch_btn_row.pack(anchor="w", pady=(0, 0))
+        self.stopwatch_start_btn = tk.Button(
+            stopwatch_btn_row,
+            text="开启",
+            command=self.start_stopwatch,
+            bg="#0b5cad",
+            fg="#ffffff",
+            activebackground="#0f6bc9",
+            activeforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            padx=16,
+            pady=9,
+            font=("Microsoft YaHei UI", 11, "bold"),
+            cursor="hand2",
+        )
+        self.stopwatch_start_btn.pack(side="left", padx=(0, 8))
+        self.stopwatch_pause_btn = tk.Button(
+            stopwatch_btn_row,
+            text="暂停",
+            command=self.pause_stopwatch,
+            bg="#e7eaed",
+            fg="#263238",
+            activebackground="#d8dee4",
+            activeforeground="#263238",
+            relief="flat",
+            borderwidth=0,
+            padx=16,
+            pady=9,
+            font=("Microsoft YaHei UI", 11),
+            cursor="hand2",
+        )
+        self.stopwatch_pause_btn.pack(side="left", padx=(0, 8))
+        tk.Button(
+            stopwatch_btn_row,
+            text="清除",
+            command=self.clear_stopwatch,
+            bg="#f0f4f8",
+            fg="#0e639c",
+            activebackground="#e5edf7",
+            activeforeground="#0e639c",
+            relief="flat",
+            borderwidth=0,
+            padx=16,
+            pady=9,
+            font=("Microsoft YaHei UI", 11),
+            cursor="hand2",
+        ).pack(side="left")
+        self.refresh_stopwatch_controls()
 
     def build_setting_row(self, parent: tk.Frame, row: int, label: str, variable: tk.StringVar) -> None:
         tk.Label(
@@ -450,7 +757,7 @@ class RestReminderApp:
         ).grid(row=row, column=1, sticky="e", pady=9, padx=(14, 0), ipady=8)
 
     def build_stat_card(self, parent: tk.Frame, title: str, value_var: tk.StringVar, accent: str) -> None:
-        card = RoundedCard(parent, bg="#ffffff", radius=14, pad=14)
+        card = RoundedCard(parent, bg="#ffffff", radius=14, pad=12, fixed_height=132)
         card.pack(fill="x", pady=(12, 0))
 
         tk.Label(
@@ -465,7 +772,7 @@ class RestReminderApp:
             textvariable=value_var,
             bg="#ffffff",
             fg=accent,
-            font=("Consolas", 34, "bold"),
+            font=("Consolas", 32, "bold"),
         ).pack(anchor="w", pady=(4, 0))
 
     def load_config(self) -> dict:
@@ -530,35 +837,45 @@ class RestReminderApp:
         else:
             self.stopwatch_after_id = None
 
-    def toggle_stopwatch(self) -> None:
-        now = time.time()
-        if self.stopwatch_running:
-            self.stopwatch_elapsed += now - self.stopwatch_started_ts
-            self.stopwatch_running = False
-            self.stopwatch_btn_var.set("继续计时")
-            if self.stopwatch_after_id is not None:
-                self.root.after_cancel(self.stopwatch_after_id)
-                self.stopwatch_after_id = None
-            self.stopwatch_var.set(self.format_elapsed(int(self.stopwatch_elapsed)))
+    def refresh_stopwatch_controls(self) -> None:
+        if self.stopwatch_start_btn is None or self.stopwatch_pause_btn is None:
             return
+        if self.stopwatch_running:
+            self.stopwatch_start_btn.configure(state="disabled", bg="#89afd8", fg="#eaf1f8", cursor="arrow")
+            self.stopwatch_pause_btn.configure(state="normal", bg="#e7eaed", fg="#263238", cursor="hand2")
+            return
+        self.stopwatch_start_btn.configure(state="normal", bg="#0b5cad", fg="#ffffff", cursor="hand2")
+        self.stopwatch_pause_btn.configure(state="disabled", bg="#dbe1e8", fg="#7a838b", cursor="arrow")
 
+    def start_stopwatch(self) -> None:
+        if self.stopwatch_running:
+            return
         self.stopwatch_running = True
-        self.stopwatch_started_ts = now
-        self.stopwatch_btn_var.set("暂停计时")
+        self.stopwatch_started_ts = time.time()
         if self.stopwatch_after_id is not None:
             self.root.after_cancel(self.stopwatch_after_id)
         self.update_stopwatch()
+        self.refresh_stopwatch_controls()
 
-    def reset_stopwatch(self) -> None:
+    def pause_stopwatch(self) -> None:
+        if not self.stopwatch_running:
+            return
+        now = time.time()
+        self.stopwatch_elapsed += now - self.stopwatch_started_ts
+        self.stopwatch_running = False
+        if self.stopwatch_after_id is not None:
+            self.root.after_cancel(self.stopwatch_after_id)
+            self.stopwatch_after_id = None
+        self.stopwatch_var.set(self.format_elapsed(int(self.stopwatch_elapsed)))
+        self.refresh_stopwatch_controls()
+
+    def clear_stopwatch(self) -> None:
         if self.stopwatch_running:
-            self.stopwatch_running = False
-            if self.stopwatch_after_id is not None:
-                self.root.after_cancel(self.stopwatch_after_id)
-                self.stopwatch_after_id = None
+            self.pause_stopwatch()
         self.stopwatch_elapsed = 0.0
         self.stopwatch_started_ts = 0.0
-        self.stopwatch_btn_var.set("开始计时")
         self.stopwatch_var.set("00:00:00")
+        self.refresh_stopwatch_controls()
 
     def update_dashboard(self, now: Optional[float] = None) -> None:
         if not self.running:

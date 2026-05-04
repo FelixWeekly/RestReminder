@@ -8,7 +8,7 @@
 - 默认每 2 小时进行一次强制休息提醒。
 - 可自定义小提醒间隔、大提醒间隔和强制休息时长。
 - 启动后会保存配置到 `config.json`。
-- 新增副时钟（正计时），支持开始/暂停与清零。
+- 新增副时钟（正计时），支持开启 / 暂停 / 清除计时。
 
 
 ## 运行
@@ -18,6 +18,12 @@
 
 ```powershell
 python .\rest_reminder.py
+```
+
+## 打包 exe（PyInstaller）
+
+```powershell
+python -m PyInstaller --noconfirm --clean RestReminder.spec
 ```
 
 ## 使用建议
