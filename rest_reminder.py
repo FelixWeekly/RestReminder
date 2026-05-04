@@ -77,10 +77,12 @@ class RestReminderApp:
         self.root = root
         self.enable_hidpi_support()
         self.root.title("Rest Reminder")
-        self.root.geometry("1260x800")
-        self.root.minsize(1120, 720)
+        self.root.geometry("1400x900")
+        self.root.minsize(1240, 780)
         self.root.configure(bg="#dde2e8")
-        self.root.overrideredirect(True)
+        self.use_borderless_window = False
+        if self.use_borderless_window:
+            self.root.overrideredirect(True)
         self.root.option_add("*Font", "{Microsoft YaHei UI} 12")
 
         self.config = self.load_config()
@@ -91,6 +93,7 @@ class RestReminderApp:
         self.last_small_ts = time.time()
         self.last_big_ts = time.time()
         self.after_id: Optional[str] = None
+        self.stopwatch_after_id: Optional[str] = None
         self.big_break_window: Optional[tk.Toplevel] = None
         self.drag_start_x = 0
         self.drag_start_y = 0
@@ -103,12 +106,21 @@ class RestReminderApp:
         self.status_var = tk.StringVar(value="未启动")
         self.next_small_var = tk.StringVar(value="--:--")
         self.next_big_var = tk.StringVar(value="--:--")
+        self.stopwatch_var = tk.StringVar(value="00:00:00")
+        self.stopwatch_btn_var = tk.StringVar(value="开始计时")
+        self.stopwatch_running = False
+        self.stopwatch_elapsed = 0.0
+        self.stopwatch_started_ts = 0.0
+        self.icon_photo_ref: Optional[tk.PhotoImage] = None
 
         self.style = ttk.Style()
         self.setup_styles()
+        self.apply_window_icon()
         self.build_ui()
         self.center_window()
         self.root.bind("<Map>", self.restore_custom_window)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_root_close)
+        self.root.after(10, self.apply_taskbar_style)
 
     def enable_hidpi_support(self) -> None:
         if sys.platform != "win32":
@@ -145,11 +157,94 @@ class RestReminderApp:
         self.root.geometry(f"+{new_x}+{new_y}")
 
     def minimize_custom_window(self) -> None:
-        self.root.overrideredirect(False)
+        if self.use_borderless_window:
+            self.root.overrideredirect(False)
         self.root.iconify()
 
     def restore_custom_window(self, _event: tk.Event) -> None:
-        self.root.overrideredirect(True)
+        if self.use_borderless_window and self.root.state() == "normal":
+            self.root.overrideredirect(True)
+        self.apply_taskbar_style()
+
+    def apply_taskbar_style(self) -> None:
+        if sys.platform != "win32" or not self.use_borderless_window:
+            return
+        try:
+            from ctypes import windll
+
+            hwnd = self.root.winfo_id()
+            GWL_EXSTYLE = -20
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOOLWINDOW = 0x00000080
+
+            ex_style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ex_style = (ex_style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
+            windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+        except Exception:
+            pass
+
+    def find_icon_source(self) -> Optional[Path]:
+        base = Path(__file__).resolve().parent
+        candidates = [
+            "app.ico",
+            "icon.ico",
+            "rest_reminder.ico",
+            "app.png",
+            "icon.png",
+            "rest_reminder.png",
+        ]
+        for name in candidates:
+            path = base / name
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def build_normalized_icon(self, source: Path) -> Optional[Path]:
+        try:
+            from PIL import Image
+        except ImportError:
+            return source if source.suffix.lower() == ".ico" else None
+
+        try:
+            with Image.open(source) as image:
+                image = image.convert("RGBA")
+                width, height = image.size
+                side = min(width, height)
+                left = (width - side) // 2
+                top = (height - side) // 2
+                cropped = image.crop((left, top, left + side, top + side))
+
+                if hasattr(Image, "Resampling"):
+                    resample = Image.Resampling.LANCZOS
+                else:
+                    resample = Image.LANCZOS
+                normalized = cropped.resize((512, 512), resample)
+
+                target = source.with_name("app.normalized.ico")
+                normalized.save(
+                    target,
+                    format="ICO",
+                    sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)],
+                )
+                return target
+        except OSError:
+            return source if source.suffix.lower() == ".ico" else None
+
+    def apply_window_icon(self) -> None:
+        source = self.find_icon_source()
+        if source is None:
+            return
+
+        icon_path = self.build_normalized_icon(source)
+        if icon_path is None:
+            return
+
+        if icon_path.suffix.lower() == ".ico":
+            self.root.iconbitmap(default=str(icon_path))
+            return
+
+        self.icon_photo_ref = tk.PhotoImage(file=str(icon_path))
+        self.root.iconphoto(True, self.icon_photo_ref)
 
     def setup_styles(self) -> None:
         try:
@@ -203,56 +298,57 @@ class RestReminderApp:
         app_surface = tk.Frame(root_wrap, bg="#eef1f5")
         app_surface.pack(fill="both", expand=True)
 
-        title_bar = tk.Frame(app_surface, bg="#e5e9ef", height=44)
-        title_bar.pack(fill="x")
-        title_bar.pack_propagate(False)
+        if self.use_borderless_window:
+            title_bar = tk.Frame(app_surface, bg="#e5e9ef", height=44)
+            title_bar.pack(fill="x")
+            title_bar.pack_propagate(False)
 
-        title_label = tk.Label(
-            title_bar,
-            text="  Rest Reminder",
-            bg="#e5e9ef",
-            fg="#1f2328",
-            font=("Segoe UI", 11, "bold"),
-            anchor="w",
-        )
-        title_label.pack(side="left", fill="y")
+            title_label = tk.Label(
+                title_bar,
+                text="  Rest Reminder",
+                bg="#e5e9ef",
+                fg="#1f2328",
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+            )
+            title_label.pack(side="left", fill="y")
 
-        title_btns = tk.Frame(title_bar, bg="#e5e9ef")
-        title_btns.pack(side="right", fill="y")
+            title_btns = tk.Frame(title_bar, bg="#e5e9ef")
+            title_btns.pack(side="right", fill="y")
 
-        min_btn = tk.Button(
-            title_btns,
-            text="-",
-            command=self.minimize_custom_window,
-            bg="#e5e9ef",
-            fg="#444",
-            activebackground="#d8dee6",
-            activeforeground="#111",
-            relief="flat",
-            borderwidth=0,
-            width=4,
-            font=("Segoe UI", 11, "bold"),
-        )
-        min_btn.pack(side="left", fill="y")
+            min_btn = tk.Button(
+                title_btns,
+                text="-",
+                command=self.minimize_custom_window,
+                bg="#e5e9ef",
+                fg="#444",
+                activebackground="#d8dee6",
+                activeforeground="#111",
+                relief="flat",
+                borderwidth=0,
+                width=4,
+                font=("Segoe UI", 11, "bold"),
+            )
+            min_btn.pack(side="left", fill="y")
 
-        close_btn = tk.Button(
-            title_btns,
-            text="✕",
-            command=self.root.destroy,
-            bg="#e5e9ef",
-            fg="#444",
-            activebackground="#c42b1c",
-            activeforeground="#ffffff",
-            relief="flat",
-            borderwidth=0,
-            width=4,
-            font=("Segoe UI", 10, "bold"),
-        )
-        close_btn.pack(side="left", fill="y")
+            close_btn = tk.Button(
+                title_btns,
+                text="✕",
+                command=self.root.destroy,
+                bg="#e5e9ef",
+                fg="#444",
+                activebackground="#c42b1c",
+                activeforeground="#ffffff",
+                relief="flat",
+                borderwidth=0,
+                width=4,
+                font=("Segoe UI", 10, "bold"),
+            )
+            close_btn.pack(side="left", fill="y")
 
-        for widget in (title_bar, title_label):
-            widget.bind("<ButtonPress-1>", self.start_drag)
-            widget.bind("<B1-Motion>", self.do_drag)
+            for widget in (title_bar, title_label):
+                widget.bind("<ButtonPress-1>", self.start_drag)
+                widget.bind("<B1-Motion>", self.do_drag)
 
         content = tk.Frame(app_surface, bg="#eef1f5", padx=30, pady=26)
         content.pack(fill="both", expand=True)
@@ -302,6 +398,22 @@ class RestReminderApp:
 
         self.build_stat_card(right.inner, "下次小提醒", self.next_small_var, "#0969da")
         self.build_stat_card(right.inner, "下次强提醒", self.next_big_var, "#bc4c00")
+        self.build_stat_card(right.inner, "副时钟", self.stopwatch_var, "#1a7f37")
+
+        stopwatch_btn_row = tk.Frame(right.inner, bg="#f8fafc")
+        stopwatch_btn_row.pack(anchor="w", pady=(12, 0))
+        ttk.Button(
+            stopwatch_btn_row,
+            textvariable=self.stopwatch_btn_var,
+            command=self.toggle_stopwatch,
+            style="Primary.TButton",
+        ).pack(side="left", padx=(0, 10))
+        ttk.Button(
+            stopwatch_btn_row,
+            text="清零",
+            command=self.reset_stopwatch,
+            style="Secondary.TButton",
+        ).pack(side="left")
 
         tk.Label(
             right.inner,
@@ -398,6 +510,56 @@ class RestReminderApp:
         remain = safe % 60
         return f"{minutes:02d}:{remain:02d}"
 
+    def format_elapsed(self, seconds: int) -> str:
+        safe = max(0, seconds)
+        hours = safe // 3600
+        minutes = (safe % 3600) // 60
+        remain = safe % 60
+        return f"{hours:02d}:{minutes:02d}:{remain:02d}"
+
+    def current_stopwatch_seconds(self, now: Optional[float] = None) -> int:
+        if not self.stopwatch_running:
+            return int(self.stopwatch_elapsed)
+        current = time.time() if now is None else now
+        return int(self.stopwatch_elapsed + (current - self.stopwatch_started_ts))
+
+    def update_stopwatch(self) -> None:
+        self.stopwatch_var.set(self.format_elapsed(self.current_stopwatch_seconds()))
+        if self.stopwatch_running:
+            self.stopwatch_after_id = self.root.after(200, self.update_stopwatch)
+        else:
+            self.stopwatch_after_id = None
+
+    def toggle_stopwatch(self) -> None:
+        now = time.time()
+        if self.stopwatch_running:
+            self.stopwatch_elapsed += now - self.stopwatch_started_ts
+            self.stopwatch_running = False
+            self.stopwatch_btn_var.set("继续计时")
+            if self.stopwatch_after_id is not None:
+                self.root.after_cancel(self.stopwatch_after_id)
+                self.stopwatch_after_id = None
+            self.stopwatch_var.set(self.format_elapsed(int(self.stopwatch_elapsed)))
+            return
+
+        self.stopwatch_running = True
+        self.stopwatch_started_ts = now
+        self.stopwatch_btn_var.set("暂停计时")
+        if self.stopwatch_after_id is not None:
+            self.root.after_cancel(self.stopwatch_after_id)
+        self.update_stopwatch()
+
+    def reset_stopwatch(self) -> None:
+        if self.stopwatch_running:
+            self.stopwatch_running = False
+            if self.stopwatch_after_id is not None:
+                self.root.after_cancel(self.stopwatch_after_id)
+                self.stopwatch_after_id = None
+        self.stopwatch_elapsed = 0.0
+        self.stopwatch_started_ts = 0.0
+        self.stopwatch_btn_var.set("开始计时")
+        self.stopwatch_var.set("00:00:00")
+
     def update_dashboard(self, now: Optional[float] = None) -> None:
         if not self.running:
             self.next_small_var.set("--:--")
@@ -460,9 +622,11 @@ class RestReminderApp:
         now = time.time()
         self.update_dashboard(now)
 
+        if self.big_break_window is not None and self.big_break_window.winfo_exists():
+            self.after_id = self.root.after(1000, self.tick)
+            return
+
         if now - self.last_big_ts >= self.big_interval_seconds:
-            self.last_big_ts = now
-            self.last_small_ts = now
             self.show_big_reminder()
         elif now - self.last_small_ts >= self.small_interval_seconds:
             self.last_small_ts = now
@@ -527,7 +691,8 @@ class RestReminderApp:
         win.transient(self.root)
 
         self.big_break_window = win
-        win.bind("<Destroy>", lambda _e: self._clear_big_window_reference())
+        win.bind("<Destroy>", self._on_big_window_destroy)
+        win.protocol("WM_DELETE_WINDOW", lambda: self.close_big_reminder(win))
 
         width = 880
         height = 530
@@ -583,6 +748,30 @@ class RestReminderApp:
 
     def _clear_big_window_reference(self) -> None:
         self.big_break_window = None
+
+    def _on_big_window_destroy(self, event: tk.Event) -> None:
+        if event.widget is self.big_break_window:
+            self.big_break_window = None
+
+    def close_big_reminder(self, win: tk.Toplevel) -> None:
+        if not win.winfo_exists():
+            return
+        win.destroy()
+        self._clear_big_window_reference()
+        if self.running:
+            now = time.time()
+            self.last_small_ts = now
+            self.last_big_ts = now
+            self.update_dashboard(now)
+
+    def on_root_close(self) -> None:
+        if self.after_id is not None:
+            self.root.after_cancel(self.after_id)
+            self.after_id = None
+        if self.stopwatch_after_id is not None:
+            self.root.after_cancel(self.stopwatch_after_id)
+            self.stopwatch_after_id = None
+        self.root.destroy()
 
     def test_now(self) -> None:
         self.status_var.set("测试中")
