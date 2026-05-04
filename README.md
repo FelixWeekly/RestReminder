@@ -10,6 +10,10 @@
 - 启动后会保存配置到 `config.json`。
 - 新增副时钟（正计时），支持开启 / 暂停 / 清除计时。
 
+## 依赖安装
+
+当前版本通知功能不强依赖第三方库，默认可直接运行。
+如果你已有虚拟环境，保持它也没问题。
 
 ## 运行
 
@@ -18,12 +22,6 @@
 
 ```powershell
 python .\rest_reminder.py
-```
-
-## 打包 exe（PyInstaller）
-
-```powershell
-python -m PyInstaller --noconfirm --clean RestReminder.spec
 ```
 
 ## 使用建议
